@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         White Yard Club · 每日預訂時間表
 // @namespace    wy-daily-reservation-schedule
-// @version      1.3.75
+// @version      1.3.76
 // @description  每日設施時間表，整合 Out of Service 灰色封鎖時段及 Remark，顯示付款狀態與建立時間。
 // @match        https://apps.nwd.com.hk/CMS/Club/FacilityBooking.aspx*
 // @grant        unsafeWindow
@@ -2339,6 +2339,7 @@ if (list.some(b=>b.row._wyOutOfService)) {
     // validation and authenticated SaveNoService flow in their own scope.
     frame.src = new URL('/CMS/Club/OutOfService.aspx', location.origin).href;
     let stopped = false, opened = false, clickedAdd = false, timer, deadline;
+    let saveConfirmed = false;
     let diagnostic = '尚未取得頁面';
     let observer, frameJQ, frameDocument, watchTimer, settleTimer, nativeEditor, disposeDefaults;
     const close = () => {
@@ -2352,9 +2353,7 @@ if (list.some(b=>b.row._wyOutOfService)) {
       document.removeEventListener('keydown',onKey);
       shade.remove(); blockingOverlay = null;
       previousFocus?.focus?.();
-      // Refresh also after native CANCEL/close: different plugin versions may
-      // not emit save-success, so never infer save success from a closed form.
-      if (opened) load({preserveRange:true});
+      if (saveConfirmed) load({preserveRange:true});
     };
     const onKey = e => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
     toolbar.append(message,button('關閉',close));
@@ -2405,6 +2404,7 @@ if (list.some(b=>b.row._wyOutOfService)) {
             jq(editor).on('save-success.wyBlockingEmbed submit-action-success.wyBlockingEmbed', function(e,action) {
               if (e.target !== editor) return;
               if (e.type === 'submit-action-success' && !['save','savedetail','confirm'].includes(String(action).toLowerCase())) return;
+              saveConfirmed = true;
               // Let the native success handlers finish before removing the frame.
               clearTimeout(settleTimer); settleTimer=setTimeout(close,100);
             });
