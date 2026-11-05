@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         White Yard Club · 每日預訂時間表
 // @namespace    wy-daily-reservation-schedule
-// @version      1.3.77
+// @version      1.3.78
 // @description  每日設施時間表，整合 Out of Service 灰色封鎖時段及 Remark，顯示付款狀態與建立時間。
 // @match        https://apps.nwd.com.hk/CMS/Club/FacilityBooking.aspx*
 // @grant        unsafeWindow
@@ -861,10 +861,13 @@ html.wyQuietNative .panelEdit, html.wyQuietNative #processPanel {opacity:0!impor
 
   const BLOCKING_API='/CMS/services/NoServices.asmx/';
   async function queryBlockingGroups(who, groupID='', signal) {
-    return C.rows(await invoke('GetFacilityNoServiceByCriteria', {
+    const response = await invoke('GetFacilityNoServiceByCriteria', {
       strFacilityID:'', strEventID:'', strSearch:'', strDateFrom:'', strDateTo:'',
       strNoServiceGroupID:String(groupID), strEstate:who.estate, strCurrentUser:who.user
-    }, signal, BLOCKING_API));
+    }, signal, BLOCKING_API);
+    // The native unfiltered Out of Service list returns {"d":null} for zero groups.
+    if (groupID === '' && response?.d === null && Object.keys(response).length === 1) return [];
+    return C.rows(response, 'Out of Service / GetFacilityNoServiceByCriteria');
   }
 
   // NoServices search is unpaginated (data-pagination-max="0" in the original page).
@@ -2908,7 +2911,7 @@ if (list.some(b=>b.row._wyOutOfService)) {
     return v;
   }
 
-  function rows(v) {
+  function rows(v, source = 'Booking / GetFacliltyBookingWithSelectedRow') {
     v = unwrap(v);
 
     if (Array.isArray(v)) return v;
@@ -2917,7 +2920,7 @@ if (list.some(b=>b.row._wyOutOfService)) {
       return v.tables[0].rows;
     }
 
-    throw Error('API 回應不是預訂列表。');
+    throw Error(source + '：API 未傳回可讀取的資料列表。');
   }
 
   function blockRuleReady(r) {
