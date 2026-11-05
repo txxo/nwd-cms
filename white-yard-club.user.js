@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         White Yard Club · 每日預訂時間表
 // @namespace    wy-daily-reservation-schedule
-// @version      1.3.74
+// @version      1.3.75
 // @description  每日設施時間表，整合 Out of Service 灰色封鎖時段及 Remark，顯示付款狀態與建立時間。
 // @match        https://apps.nwd.com.hk/CMS/Club/FacilityBooking.aspx*
 // @grant        unsafeWindow
@@ -16,7 +16,8 @@
 (function reservationMain(C) {
   'use strict';
 
-  /* 1.3.74: show only the create-time Change To while creating; retain the native status controls for existing bookings.
+  /* 1.3.75: colour mixed-status bookings individually; block repeated create SAVE clicks while saving.
+     1.3.74: show only the create-time Change To while creating; retain the native status controls for existing bookings.
      1.3.73: transparent loading background; create-time Change To next to the native status control; default Pending label.
      1.3.72: show loading from the create SAVE click through native status confirmation and the final painted refresh; release on validation/save failure.
      1.3.71: no native "Saved" popup (short toast instead); create-time choice is Pending/Settled only; Settled-at-creation runs invisibly with a single refresh.
@@ -500,6 +501,11 @@ html.wyQuietNative .panelEdit, html.wyQuietNative #processPanel {opacity:0!impor
 #wyDailySheet td.wySettledCell {background:var(--wy-paid);box-shadow:inset 4px 0 0 var(--wy-lawn);padding-left:5px}
 #wyDailySheet td.wyPendingCell {background:var(--wy-pending);box-shadow:inset 4px 0 0 var(--wy-ochre);padding-left:5px}
 #wyDailySheet .wyBooking:hover {background:#1e2b2a0f}
+/* Distinct Ref Nos remain distinct bookings. In mixed cells each booking owns
+   its colour, so a real Pending neighbour cannot make the Paid booking yellow. */
+#wyDailySheet td.wyMixedCell {background:#fff;box-shadow:none}
+#wyDailySheet .wyMixedCell .wyBooking.wySettled {background:var(--wy-paid);box-shadow:inset 3px 0 0 var(--wy-lawn);padding-left:5px}
+#wyDailySheet .wyMixedCell .wyBooking.wyPending {background:var(--wy-pending);box-shadow:inset 3px 0 0 var(--wy-ochre);padding-left:5px}
 #wyDailySheet .wyBooking .wyBookingUnit {color:var(--wy-ink)}
 #wyDailySheet .wyBooking .wySport {color:#44524F}
 #wyDailySheet .wyPending .wyPayment {background:transparent;color:#8A5A00}
@@ -665,6 +671,11 @@ html.wyQuietNative .panelEdit, html.wyQuietNative #processPanel {opacity:0!impor
     }
     function rememberAfterStatus(event) {
       if(!event.target.closest?.('.btn-booking'))return;
+      // Capture runs before native SAVE handlers. A second click must not reach
+      // them or overwrite the first submission's remembered settlement plan.
+      if(bookingSave) {
+        event.preventDefault();event.stopImmediatePropagation();return;
+      }
       const status=dialog.querySelector('.wyAfterStatus select')?.value;
       delete editor.dataset.wyAfter;
       beginBookingSave(editor);
@@ -2070,9 +2081,13 @@ function updateDateLabel() {
 
           const active = list.filter(b => !b.row._wyOutOfService && !C.cancelled(b.row) && !C.overdue(b.row));
 
-          if (active.some(b => paymentState(b.row) === 'PENDING')) {
+          const hasPending = active.some(b => paymentState(b.row) === 'PENDING');
+          const hasPaid = active.some(b => paymentState(b.row) === 'PAID');
+          if (hasPending && hasPaid) {
+            td.className = 'wyMixedCell';
+          } else if (hasPending) {
             td.className = 'wyPendingCell';
-          } else if (active.some(b => paymentState(b.row) === 'PAID')) {
+          } else if (hasPaid) {
             td.className = 'wySettledCell';
           }
         }
@@ -2114,6 +2129,8 @@ function updateDateLabel() {
           );
 
           const btn = button(null, () => openRecord(r), cls);
+          btn.dataset.wyBookingId = String(r.FacilityBookingID ?? '');
+          btn.dataset.wyRefNo = String(r.RefNo ?? '');
           btn.append(el('span', C.unit(r), 'wyBookingUnit'));
           btn.append(el('small', facilityIconLabel(g.columns[j], r), 'wySport'));
 
