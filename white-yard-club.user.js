@@ -9,6 +9,8 @@
 // @connect      www.1823.gov.hk
 // @connect      data.weather.gov.hk
 // @run-at       document-end
+// @updateURL    https://github.com/txxo/nwd-cms/raw/refs/heads/main/white-yard-club.user.js
+// @downloadURL    https://github.com/txxo/nwd-cms/raw/refs/heads/main/white-yard-club.user.js
 // ==/UserScript==
 
 (function reservationMain(C) {
