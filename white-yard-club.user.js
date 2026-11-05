@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         White Yard Club · 每日預訂時間表
 // @namespace    wy-daily-reservation-schedule
-// @version      1.3.69
+// @version      1.3.74
 // @description  每日設施時間表，整合 Out of Service 灰色封鎖時段及 Remark，顯示付款狀態與建立時間。
 // @match        https://apps.nwd.com.hk/CMS/Club/FacilityBooking.aspx*
 // @grant        unsafeWindow
@@ -16,7 +16,12 @@
 (function reservationMain(C) {
   'use strict';
 
-  /* 1.3.69: new booking, Tower 25 - ground-floor Flat A-D keep showing G/F but select the native LG/F & G/F floor; Flat E/F use plain G/F. (Based on 1.3.67.)
+  /* 1.3.74: show only the create-time Change To while creating; retain the native status controls for existing bookings.
+     1.3.73: transparent loading background; create-time Change To next to the native status control; default Pending label.
+     1.3.72: show loading from the create SAVE click through native status confirmation and the final painted refresh; release on validation/save failure.
+     1.3.71: no native "Saved" popup (short toast instead); create-time choice is Pending/Settled only; Settled-at-creation runs invisibly with a single refresh.
+     1.3.70: new booking form - choose the final status (Settled / Overdue) at creation; carried out natively right after the booking is saved.
+     1.3.69: new booking, Tower 25 - ground-floor Flat A-D keep showing G/F but select the native LG/F & G/F floor; Flat E/F use plain G/F. (Based on 1.3.67.)
      1.3.67: visual refresh only (drafting-sheet skin) - CSS tokens/overrides, iframe record-view CSS, weekend colour; no logic changes.
      1.3.57: bundle UI 1.2; collapse Resident Zone/Setting once on load;
      compact inactive records with facility column labels and cancellation reasons;
@@ -28,6 +33,7 @@
 
   let root, panel, table, oldTable;
   let busy = false;
+  let bookingSave = null;
   let mode = true;
   let data = [];
   let noServiceData = [];
@@ -316,9 +322,9 @@ body {background:#fff!important;color:var(--wy-text);font-family:var(--wy-font)!
    .clsOpacityBackground: those backdrops belong to booking/error dialogs. */
 #processPanel,.clsProcessBox,.clsLoadingBox,.clsOpacityBackgroundWithLoading {display:none!important;visibility:hidden!important;pointer-events:none!important}
 
-/* Keep the timetable covered until its own requests and browser paint finish. */
+/* Keep the loading indicator visible until requests and browser paint finish. */
 #wyDailySheet .wySheetBody {position:relative;min-height:180px}
-#wyDailySheet .wyScheduleLoading {position:absolute;inset:0;z-index:40;display:flex;align-items:flex-start;justify-content:center;padding:70px 16px 16px;background:rgba(243,245,242,.94);cursor:progress;box-sizing:border-box}
+#wyDailySheet .wyScheduleLoading {position:absolute;inset:0;z-index:40;display:flex;align-items:flex-start;justify-content:center;padding:70px 16px 16px;background:transparent;cursor:progress;box-sizing:border-box}
 #wyDailySheet .wyScheduleLoading[hidden] {display:none!important}
 #wyDailySheet .wyLoadingCard {position:sticky;top:24px;display:flex;align-items:center;gap:12px;padding:16px 22px;border:1px solid var(--wy-border);border-radius:8px;background:#fff;box-shadow:0 4px 18px #1e2b2a14;color:var(--wy-text);font:14px var(--wy-font)}
 #wyDailySheet .wyLoadingSpinner {width:22px;height:22px;flex:0 0 22px;border:3px solid var(--wy-border);border-top-color:var(--wy-accent);border-radius:50%;animation:wyScheduleSpin .8s linear infinite}
@@ -438,6 +444,23 @@ style.textContent += `
 .edit-page-details[data-save*="FacilityBookingServices.asmx/FacilityBooking"] .Status .status-bg {width:auto!important;min-width:100px;min-height:30px;padding:5px 12px;border-radius:5px;background:#E7EEEA!important;color:var(--wy-form-accent,#234B43)!important;font-size:13px;line-height:20px}
 .edit-page-details[data-save*="FacilityBookingServices.asmx/FacilityBooking"] .Status .blue {color:var(--wy-form-muted,#5C6B68);font-size:11px;line-height:18px}
 .edit-page-details[data-save*="FacilityBookingServices.asmx/FacilityBooking"].wyExistingBooking :is(select:disabled,input:disabled) {color:#44524F;background-color:#EFF3F0}
+
+/* Use one Change To: the create-time choice for new bookings, native controls for existing records. */
+.edit-page-details[data-save*="FacilityBookingServices.asmx/FacilityBooking"] .Status.wyCreateStatus {display:block!important}
+/* Native code can set display:block inline; override it only in create mode. */
+.edit-page-details[data-save*="FacilityBookingServices.asmx/FacilityBooking"] .Status.wyCreateStatus :is(.field-input.ddl-select,.status-bg) {display:none!important}
+.edit-page-details[data-save*="FacilityBookingServices.asmx/FacilityBooking"] .Status.wyCreateStatus .wyAfterStatus {width:60%;margin-left:auto;margin-right:35px;flex-wrap:wrap}
+.edit-page-details[data-save*="FacilityBookingServices.asmx/FacilityBooking"] .Status .wyAfterStatus {display:inline-flex;align-items:center;gap:8px;margin:0;color:var(--wy-form-muted,#5C6B68);font:600 12px var(--wy-font);letter-spacing:.3px}
+.edit-page-details[data-save*="FacilityBookingServices.asmx/FacilityBooking"] .Status .wyAfterStatus[hidden] {display:none!important}
+.edit-page-details[data-save*="FacilityBookingServices.asmx/FacilityBooking"] .Status .wyAfterStatus select {width:auto!important;min-width:130px;min-height:36px;padding:6px 10px;border:1px solid var(--wy-form-border,#CBD3D0);border-radius:3px;background:#fff;color:var(--wy-form-text,#1E2B2A);font:13px var(--wy-font)}
+.edit-page-details[data-save*="FacilityBookingServices.asmx/FacilityBooking"] .Status .wyAfterStatus.wyAfterStatusOn select {border-color:var(--wy-lawn,#3E7D4F)!important;box-shadow:inset 3px 0 0 var(--wy-lawn,#3E7D4F);font-weight:600}
+
+/* Quiet native steps and the save toast. */
+html.wyQuietNative .panelEdit, html.wyQuietNative #processPanel {opacity:0!important;pointer-events:none!important}
+#wyToast {position:fixed;left:50%;bottom:28px;z-index:2147483000;transform:translate(-50%,8px);padding:9px 18px;border-radius:3px;background:var(--wy-ink,#1E2B2A);color:#fff;font:600 13px var(--wy-font);box-shadow:var(--wy-shadow,0 10px 30px #1e2b2a29);opacity:0;pointer-events:none;transition:opacity .18s,transform .18s}
+#wyToast.wyToastShow {opacity:1;transform:translate(-50%,0)}
+#wyToast.wyToastError {background:var(--wy-red,#B4412F);max-width:min(560px,90vw);text-align:center;line-height:1.5}
+@media (prefers-reduced-motion:reduce) {#wyToast {transition:none}}
 
 /* ───────── 1.3.67 · Drafting-sheet skin (visual layer only) ─────────
    One idea: a cell's state is read from its left edge, like a margin note on a plan.
@@ -597,6 +620,65 @@ style.textContent += `
       }
       return none;
     }
+    // Create-time status. The booking is still created natively (Pending); the choice is only remembered
+    // here and carried out after save-success. The select has no name, so it does
+    // not replace or submit the native strStatus field.
+    let wasVisible=false;
+    function resetAfterStatus() {
+      const field=dialog.querySelector('.wyAfterStatus');
+      const control=field?.querySelector('select');
+      if(control&&control.value){control.value='';field.classList.remove('wyAfterStatusOn');}
+      delete editor.dataset.wyAfter;
+    }
+    function ensureAfterStatus(existing) {
+      let row=editor.querySelector('.field.Status');
+      if(!row && !existing) {
+        const items=editor.querySelector('.record-items');
+        if(!items)return;
+        row=document.createElement('div');row.className='field Status';
+        const title=document.createElement('div');title.className='field-label';title.textContent='Status';
+        const input=document.createElement('div');input.className='field-input';
+        row.append(title,input);items.appendChild(row);
+      }
+      if(!row)return;
+      row.classList.toggle('wyCreateStatus',!existing);
+      const nativeChoice=row.querySelector('.field-input.ddl-select');
+      const holder=nativeChoice?.parentElement || row.querySelector(':scope > .field-input');
+      if(!holder)return;
+      let field=dialog.querySelector('.wyAfterStatus');
+      if(!field) {
+        field=document.createElement('label');field.className='wyAfterStatus';
+        const text=document.createElement('span');text.textContent='Change To';
+        const control=document.createElement('select');
+        for(const [value,label] of [['','Pending'],['PAID','Settled']]) {
+          const option=document.createElement('option');option.value=value;option.textContent=label;control.appendChild(option);
+        }
+        control.value='';
+        control.addEventListener('change',()=>field.classList.toggle('wyAfterStatusOn',!!control.value));
+        field.append(text,control);
+      }
+      if(nativeChoice) {
+        if(nativeChoice.nextElementSibling!==field)nativeChoice.after(field);
+      } else if(field.parentElement!==holder)holder.appendChild(field);
+      field.hidden=!!existing;
+      if(existing)resetAfterStatus();
+    }
+    function rememberAfterStatus(event) {
+      if(!event.target.closest?.('.btn-booking'))return;
+      const status=dialog.querySelector('.wyAfterStatus select')?.value;
+      delete editor.dataset.wyAfter;
+      beginBookingSave(editor);
+      if(!status)return;
+      const date=/^(\d{2})\/(\d{2})\/(\d{4})$/.exec(bookingDateText(editor.querySelector('.facility-date-pick'),jq));
+      const first=select('strTime')?.selectedOptions?.[0];
+      const time=/(\d{1,2}:\d{2})\s*[-–]\s*\d{1,2}:\d{2}/.exec((first?.value||'')+' '+(first?.textContent||''));
+      if(!date||!time)return;
+      editor.dataset.wyAfter=JSON.stringify({
+        status,date:date[3]+'-'+date[2]+'-'+date[1],start:time[1],
+        facility:selectedText(select('strFacilityID')),venue:selectedText(select('strVenueID'))
+      });
+    }
+    dialog.addEventListener('click',rememberAfterStatus,true);
     function addCancel() {
       const footer=Array.from(dialog.children).find(e=>e.classList.contains('footer')&&e.classList.contains('buttons'));
       if(!footer || footer.querySelector('.wyBookingCancel'))return;
@@ -627,6 +709,10 @@ style.textContent += `
       editor.classList.toggle('wyExistingBooking',!!existing);
       editor.classList.toggle('wyBlockResident',kind==='block');
       updateDate(!!existing);
+      ensureAfterStatus(!!existing);
+      const visible=!!(dialog.offsetWidth||dialog.offsetHeight);
+      if(wasVisible && !visible)resetAfterStatus();
+      wasVisible=visible;
       const ground=groundFlatFloor(kind,block,floor,flat);
       const floorChanged=filterOptions(floor,kind==='tower'?(o=>towerFloor(o) && o!==ground.hide):null,originals) || ground.changed;
       const flatChanged=filterOptions(flat,kind==='tower'?towerFlat:kind==='block'?o=>!towerFlat(o):null,originals);
@@ -651,7 +737,7 @@ style.textContent += `
     observer.observe(editor,{childList:true,subtree:true});
     const visibilityObserver=new MutationObserver(schedule);
     visibilityObserver.observe(dialog.parentElement||dialog,{attributes:true,attributeFilter:['class','style','hidden']});
-    const controller={detached:()=>!editor.isConnected,stop(){stopped=true;clearTimeout(timer);observer.disconnect();visibilityObserver.disconnect();installed.delete(editor);for(const control of [select('strFloor'),select('strFlat')])for(const option of control?.options||[]){const original=originals.get(option);if(original){option.hidden=original.hidden;option.disabled=original.disabled;}if(relabelled.has(option)){option.textContent=relabelled.get(option);relabelled.delete(option);}}if(jq)jq(editor).off('.wyBookingFormV2');else editor.removeEventListener('change',schedule);}};
+    const controller={detached:()=>!editor.isConnected,stop(){stopped=true;clearTimeout(timer);observer.disconnect();dialog.removeEventListener('click',rememberAfterStatus,true);visibilityObserver.disconnect();installed.delete(editor);for(const control of [select('strFloor'),select('strFlat')])for(const option of control?.options||[]){const original=originals.get(option);if(original){option.hidden=original.hidden;option.disabled=original.disabled;}if(relabelled.has(option)){option.textContent=relabelled.get(option);relabelled.delete(option);}}if(jq)jq(editor).off('.wyBookingFormV2');else editor.removeEventListener('change',schedule);}};
     installed.set(editor,controller);controllers.add(controller);update();
   }
   function scan() {
@@ -706,6 +792,9 @@ style.textContent += `
   }
 
   function setScheduleLoading(active, selected) {
+    // Creating, settling and refreshing share one uninterrupted loading overlay.
+    active = active || !!bookingSave;
+    selected = selected || dateInput.value;
     panel.setAttribute('aria-busy', String(active));
     loadingOverlay.hidden = !active;
     if (active) {
@@ -859,6 +948,8 @@ style.textContent += `
   }
 
   async function load(options = {}) {
+    // Do not fetch an intermediate Pending state while native creation/settlement is running.
+    if (bookingSave && !options?.afterBookingSave) return;
     const selected = dateInput.value;
 
     if (!C.valid(selected)) {
@@ -969,7 +1060,7 @@ style.textContent += `
         // A newer date may have started loading during the paint wait.
         if (run === serial) {
           busy = false;
-          refreshButton.disabled = false;
+          refreshButton.disabled = !!bookingSave;
           setScheduleLoading(false);
         }
       }
@@ -1002,6 +1093,182 @@ style.textContent += `
 
   let successRefreshTimer;
   let successHooksReady = false;
+  function beginBookingSave(editor) {
+    if (bookingSave || editor.querySelector('[name="strFacilityBookingID"]')?.value) return;
+    clearTimeout(successRefreshTimer);
+    const controls = Array.from(panel.querySelectorAll('.wyBar button, .wyBar input'));
+    const state = {editor, phase:'saving', ready:scheduleReady,
+      controls:controls.map(control => [control, control.disabled]), poll:null};
+    bookingSave = state;
+    scheduleReady = false;
+    for (const control of controls) control.disabled = true;
+    setScheduleLoading(true, dateInput.value);
+    loadingLabel.textContent = '正在儲存預訂…';
+    say('正在儲存預訂…');
+    // Native validation may stop before any request is sent. An unsuccessful request
+    // also has no success event. Once native requests finish, restore the form/grid;
+    // only save-success is allowed to advance to settlement or the final refresh.
+    state.poll = setInterval(() => {
+      if (bookingSave !== state || state.phase !== 'saving') {
+        clearInterval(state.poll);
+        return;
+      }
+      if (!getPageWindow().jQuery?.active) {
+        scheduleReady = state.ready;
+        finishBookingSave(state);
+        say('預訂尚未確認儲存，請檢查原表單的驗證或錯誤訊息。', true);
+      }
+    }, 100);
+  }
+  function finishBookingSave(state) {
+    if (!state || bookingSave !== state) return;
+    clearInterval(state.poll);
+    bookingSave = null;
+    for (const [control, disabled] of state.controls) control.disabled = disabled;
+    refreshButton.disabled = busy;
+    setScheduleLoading(busy, dateInput.value);
+  }
+  async function refreshAfterBookingSave() {
+    const state = bookingSave;
+    if (state) { state.phase = 'refreshing'; clearInterval(state.poll); }
+    try {
+      // Give the native success handler time to finish closing/searching its form.
+      await wyPause(200);
+      await load({afterBookingSave:true});
+    } finally { finishBookingSave(state); }
+  }
+  // 1.3.70: choose Settled/Overdue while creating a booking. The booking is created natively as Pending;
+  // once saved, the native "Change To" + SAVE step is run for that record, so validation and
+  // server-side confirmation behave exactly as when done by hand.
+  const wyPause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  function readAfterStatus(editor) {
+    const raw = editor?.dataset?.wyAfter;
+    if (!raw) return null;
+    delete editor.dataset.wyAfter;
+    try {
+      const plan = JSON.parse(raw);
+      return plan.status === 'PAID' && C.valid(plan.date) && /^\d{1,2}:\d{2}$/.test(plan.start) ? plan : null;
+    } catch { return null; }
+  }
+  async function findCreatedBooking(plan) {
+    const who = identity();
+    const dmy = C.dmy(plan.date);
+    const query = {
+      strFacilityID: null, strBlock: null, strFloor: null, strFlat: null, strStatus: null, strSearch: '',
+      strDateFrom: dmy, strDateTo: dmy, strFacilityBookingID: '',
+      strEstate: who.estate, strCurrentUser: who.user
+    };
+    const norm = v => String(v || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const alike = (a, b) => { a = norm(a); b = norm(b); return !a || !b || a === b || a.includes(b) || b.includes(a); };
+    for (let attempt = 0; attempt < 8; attempt++) {
+      await wyPause(attempt ? 800 : 500);
+      const records = await C.collect(
+        (start, end) => invoke('GetFacliltyBookingWithSelectedRow',
+          {...query, strStartRow:String(start), strEndRow:String(end), strOrder:'Created Date', strIsASC:'0'}),
+        () => invoke('GetFacliltyBookingTotalNumber', {...query, strFacilityID:''}),
+        () => {}
+      );
+      // A slot cannot be double booked, so a Pending booking in the same slot is the one just created.
+      const matches = records.filter(r =>
+        r.FacilityBookingID && paymentState(r) === 'PENDING' && C.day(r.Date) === plan.date &&
+        C.minutes(r.TimeFrom) === C.minutes(plan.start) &&
+        alike(plan.facility, r.FacilityName) && alike(plan.venue, C.venueName(r)));
+      if (matches.length === 1) return matches[0];
+      if (matches.length > 1) throw Error('找到多於一筆相同時段的 Pending 預訂，為免誤改，請在原記錄中手動設定狀態。');
+    }
+    throw Error('找不到剛建立的預訂，請在原記錄中手動設定狀態。');
+  }
+  async function applyNativeStatus(record, status, label) {
+    await waitBooking(() => !busy && !openingBooking, '時間表仍在更新，請稍後在原記錄中手動設定狀態。');
+    const jq = getPageWindow().jQuery;
+    // The native form still opens and runs (validation, confirmation, server call) but stays invisible.
+    // It is shown again only if the native form needs something from the user.
+    document.documentElement.classList.add('wyQuietNative');
+    try {
+      openRecord(record, {quiet:true});
+      const opened = await waitBooking(() => {
+        const editor = Array.from(document.querySelectorAll('.edit-page-details')).find(e =>
+          String(e.querySelector('[name="strFacilityBookingID"]')?.value) === String(record.FacilityBookingID));
+        const footer = Array.from(editor?.closest('.clsInputDialog')?.children || []).find(c => c.classList.contains('footer'));
+        const confirm = footer?.querySelector('.btn-confirm');
+        const select = editor?.querySelector('select[name="strStatus"]');
+        if (!confirm || !select || select.disabled || confirm.offsetParent === null) return null;
+        return Array.from(select.options).some(o => o.value === status) ? {editor, confirm, select} : null;
+      }, '原系統記錄未能打開，請在原記錄中手動設定狀態。');
+      jq(opened.select).val(status).trigger('change');
+      await wyPause(150);
+      const outcome = await new Promise(resolve => {
+        let poll, timer;
+        const done = result => { clearInterval(poll); clearTimeout(timer); jq(document).off('.wyQuietConfirm'); resolve(result); };
+        jq(document).on('submit-action-success.wyQuietConfirm', '.edit-page-details', function(e, action) {
+          if (e.target === opened.editor && String(action).toLowerCase() === 'confirm') done('ok');
+        });
+        poll = setInterval(() => { if (opened.editor.querySelector('.validate-error')) done('invalid'); }, 100);
+        timer = setTimeout(() => done('timeout'), 10000);
+        opened.confirm.click();
+      });
+      if (outcome === 'invalid') throw Error('原表單要求補充資料（例如聯絡電話或付款方式）。已預選 ' + label + '，補完後請按 SAVE。');
+      if (outcome === 'timeout') throw Error('原系統沒有回應，請在原記錄中確認狀態。');
+    } finally { document.documentElement.classList.remove('wyQuietNative'); }
+  }
+  let settlingAfterCreate = false;
+  async function settleAfterCreate(plan) {
+    if (settlingAfterCreate) {
+      say('上一筆預訂仍在設定狀態，這一筆請在原記錄中手動設定。', true);
+      return;
+    }
+    const label = 'Settled';
+    settlingAfterCreate = true;
+    if (bookingSave) { bookingSave.phase = 'settling'; clearInterval(bookingSave.poll); }
+    setScheduleLoading(true, plan.date);
+    loadingLabel.textContent = '正在建立並設為 ' + label + '…';
+    let failure = '';
+    try {
+      say('正在建立並設為 ' + label + '…');
+      const record = await findCreatedBooking(plan);
+      await applyNativeStatus(record, plan.status, label);
+    } catch (e) {
+      // A timeout does not prove that the server kept the Pending state.
+      failure = e.message + '（預訂本身已建立，請確認實際付款狀態。）';
+    } finally {
+      // The confirm success event is suppressed below. This owns the single final
+      // refresh, and loading stays visible until load() has rendered and painted.
+      await refreshAfterBookingSave();
+      settlingAfterCreate = false;
+    }
+    if (failure) { say(failure, true); toast(failure, true); }
+    else toast('已建立並設為 ' + label);
+  }
+
+  // 1.3.71: the native "Saved" alert is replaced by a short toast; every other message still pops up.
+  let toastTimer;
+  function toast(text, isError) {
+    let box = document.getElementById('wyToast');
+    if (!box) { box = el('div', null, 'wyToast'); box.id = 'wyToast'; box.setAttribute('role', 'status'); document.body.append(box); }
+    box.textContent = text;
+    box.classList.toggle('wyToastError', !!isError);
+    box.classList.add('wyToastShow');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => box.classList.remove('wyToastShow'), isError ? 4500 : 1800);
+  }
+  let quietSavedReady = false;
+  function installQuietSaved() {
+    if (quietSavedReady) return;
+    const util = getPageWindow().msgBoxUtil;
+    if (!util || typeof util.set !== 'function' || typeof util.show !== 'function') return;
+    const nativeSet = util.set, nativeShow = util.show;
+    let lastMessage = '';
+    // Only a "Saved" alert that was just set is skipped; any other message (errors, confirmations) shows as before.
+    util.set = function(box, title, message) { lastMessage = String(message ?? '').trim(); return nativeSet.apply(this, arguments); };
+    util.show = function() {
+      const skip = /^saved$/i.test(lastMessage);
+      lastMessage = '';
+      if (skip) { if (!settlingAfterCreate && !bookingSave) toast('已儲存'); return; }
+      return nativeShow.apply(this, arguments);
+    };
+    quietSavedReady = true;
+  }
+
   function installBookingSuccessHooks() {
     if (successHooksReady) return;
     const pageWindow = getPageWindow();
@@ -1011,6 +1278,15 @@ style.textContent += `
       // Ignore events bubbling from nested editors, such as additional charges.
       if (e.target !== this) return;
       if (e.type === 'submit-action-success' && !['confirm','cancelbook','savedetail'].includes(String(action).toLowerCase())) return;
+      if (settlingAfterCreate) return;
+      if (e.type === 'save-success') {
+        const plan = readAfterStatus(this);
+        if (plan) { settleAfterCreate(plan); return; }
+        if (bookingSave?.editor === this) {
+          refreshAfterBookingSave().then(() => toast('已儲存'));
+          return;
+        }
+      }
       clearTimeout(successRefreshTimer);
       successRefreshTimer = setTimeout(() => {
         load();
@@ -1113,10 +1389,10 @@ style.textContent += `
     target.addEventListener('blur',hideHoverDetails);target.addEventListener('click',hideHoverDetails);
   }
 
-  function openRecord(r) {
+  function openRecord(r, options) {
     hideHoverDetails();
     installBookingSuccessHooks();
-    if (busy || openingBooking) return;
+    if (busy || openingBooking || (bookingSave && !options?.quiet)) return;
     const pageWindow = getPageWindow();
     const jq = pageWindow.jQuery;
     if (!jq?.fn?.editPage || !r.FacilityBookingID) {
@@ -1130,7 +1406,7 @@ style.textContent += `
         row.getAttribute('data-facliltybooking') === String(r.FacilityBookingID));
       // Reuse the original list event, including its detail load and view-mode setup.
       jq(root).trigger('result-item-double-click', [item ? jq(item) : jq([]), record]);
-      document.querySelector('.edit-page-details')?.scrollIntoView?.({behavior:'smooth',block:'start'});
+      if (!options?.quiet) document.querySelector('.edit-page-details')?.scrollIntoView?.({behavior:'smooth',block:'start'});
     } catch (e) { say('無法打開原系統記錄：' + e.message, true); }
   }
 
@@ -1168,7 +1444,7 @@ style.textContent += `
   }
   async function openBooking(column, rowIndex) {
     installBookingSuccessHooks();
-    if (busy || !scheduleReady || openingBooking || dateInput.value !== shownDate) return;
+    if (busy || bookingSave || !scheduleReady || openingBooking || dateInput.value !== shownDate) return;
     const date = shownDate;
     const hour = 8 + rowIndex;
     const sessionHours = ['bbq1','bbq2'].includes(column.id) ? 3 : 1;
@@ -2328,6 +2604,8 @@ if (list.some(b=>b.row._wyOutOfService)) {
     installMenuDefaults();
     installDateSync();
     dateInput.onchange = load;
+    installBookingSuccessHooks();
+    { let tries = 0; const timer = setInterval(() => { installQuietSaved(); if (quietSavedReady || ++tries > 40) clearInterval(timer); }, 500); installQuietSaved(); }
     refreshWeather();
     refreshWarnings();
     initForecast();
