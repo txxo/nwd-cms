@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         White Yard Club · 每日預訂時間表
 // @namespace    wy-daily-reservation-schedule
-// @version      1.3.76
+// @version      1.3.77
 // @description  每日設施時間表，整合 Out of Service 灰色封鎖時段及 Remark，顯示付款狀態與建立時間。
 // @match        https://apps.nwd.com.hk/CMS/Club/FacilityBooking.aspx*
 // @grant        unsafeWindow
@@ -98,6 +98,7 @@
 #wyDailySheet .wyWeather {flex-wrap:wrap;}
 #wyDailySheet .wyWeatherLive {font-size:10px;font-weight:normal;color:var(--wy-muted);}
 #wyDailySheet .wyBlockingOverlay {position:fixed;inset:0;z-index:2147483641;background:#0007;display:flex;align-items:center;justify-content:center;padding:12px;}
+#wyDailySheet .wyBlockingOverlay[hidden] {display:none!important}
 #wyDailySheet .wyBlockingCard {display:flex;flex-direction:column;background:white;width:min(880px,96vw);height:88vh;max-height:900px;border-radius:10px;overflow:hidden;box-shadow:0 8px 30px #0005;}
 #wyDailySheet .wyBlockingBar {display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 18px;background:var(--wy-accent);color:white;flex-shrink:0;}
 #wyDailySheet .wyBlockingCard iframe {display:block;border:0;width:100%;flex:1;min-height:0;background:white;}
@@ -2321,11 +2322,10 @@ if (list.some(b=>b.row._wyOutOfService)) {
   }
 
   let blockingOverlay = null;
-  function openBlockingForm() {
-    if (blockingOverlay) { blockingOverlay.querySelector('button')?.focus(); return; }
-    hideHoverDetails(); hideGridLocator();
-    const previousFocus = document.activeElement;
+  let preparedBlockingPage = null;
+  function createBlockingPage() {
     const shade = el('div', null, 'wyBlockingOverlay');
+    shade.hidden = true;
     const card = el('div', null, 'wyBlockingCard');
     card.setAttribute('role','dialog'); card.setAttribute('aria-modal','true');
     card.setAttribute('aria-label','OUT OF SERVICE');
@@ -2338,6 +2338,41 @@ if (list.some(b=>b.row._wyOutOfService)) {
     // A same-origin frame keeps the native page scripts, dropdown data,
     // validation and authenticated SaveNoService flow in their own scope.
     frame.src = new URL('/CMS/Club/OutOfService.aspx', location.origin).href;
+    frame.style.visibility='hidden';
+    card.append(toolbar,frame); shade.append(card); panel.append(shade);
+    return {shade,toolbar,message,frame};
+  }
+  function discardPreparedBlockingPage() {
+    if (!preparedBlockingPage) return;
+    clearTimeout(preparedBlockingPage.expiry);
+    preparedBlockingPage.shade.remove();
+    preparedBlockingPage = null;
+  }
+  function prepareBlockingPage() {
+    if (preparedBlockingPage || blockingOverlay || document.hidden || !scheduleReady) return;
+    const source = root.querySelector('.btnOutOfService');
+    if (!source || source.disabled || source.hidden || source.classList.contains('hide') || source.style.display === 'none') return;
+    let who;
+    try { who = identity(); } catch { return; }
+    preparedBlockingPage = {...createBlockingPage(), who};
+    preparedBlockingPage.expiry = setTimeout(discardPreparedBlockingPage, 120000);
+  }
+  function openBlockingForm() {
+    if (blockingOverlay) { blockingOverlay.querySelector('button')?.focus(); return; }
+    hideHoverDetails(); hideGridLocator();
+    const previousFocus = document.activeElement;
+    if (preparedBlockingPage) {
+      try {
+        const who = identity();
+        if (who.estate !== preparedBlockingPage.who.estate || who.user !== preparedBlockingPage.who.user) discardPreparedBlockingPage();
+      } catch { discardPreparedBlockingPage(); }
+    }
+    const page = preparedBlockingPage || createBlockingPage();
+    clearTimeout(page.expiry);
+    preparedBlockingPage = null;
+    const {shade, toolbar, message, frame} = page;
+    blockingOverlay = shade;
+    shade.hidden = false;
     let stopped = false, opened = false, clickedAdd = false, timer, deadline;
     let saveConfirmed = false;
     let diagnostic = '尚未取得頁面';
@@ -2357,8 +2392,6 @@ if (list.some(b=>b.row._wyOutOfService)) {
     };
     const onKey = e => { if (e.key === 'Escape') { e.preventDefault(); close(); } };
     toolbar.append(message,button('關閉',close));
-    card.append(toolbar,frame); shade.append(card);
-    blockingOverlay = shade; panel.append(shade);
     document.addEventListener('keydown',onKey);
     toolbar.querySelector('button').focus();
     const fail = text => {
@@ -2366,7 +2399,15 @@ if (list.some(b=>b.row._wyOutOfService)) {
       clearTimeout(timer); message.textContent=text;
       frame.style.visibility='hidden';
     };
-    frame.addEventListener('load', () => { if (opened && !stopped) close(); });
+    frame.addEventListener('load', () => {
+      if (stopped) return;
+      if (opened) {
+        if (frame.contentDocument !== frameDocument) close();
+      } else {
+        clearTimeout(timer);
+        poll();
+      }
+    });
     frame.addEventListener('error',()=>fail('未能載入封鎖表單，請關閉後重試。'));
     deadline = Date.now()+30000;
     const poll = () => {
@@ -2390,7 +2431,7 @@ if (list.some(b=>b.row._wyOutOfService)) {
             clickedAdd = true;
             message.textContent = '已點擊原系統＋號，正在等待封鎖表單…';
             add.click();
-            timer=setTimeout(poll,150);
+            timer=setTimeout(poll,0);
             return;
           }
           if (clickedAdd && editor && jq?.fn?.editPage) {
@@ -2456,8 +2497,7 @@ if (list.some(b=>b.row._wyOutOfService)) {
       if (Date.now() >= deadline) { fail('封鎖表單載入逾時。請複製以下診斷文字：'+diagnostic); return; }
       timer=setTimeout(poll,150);
     };
-    frame.style.visibility='hidden';
-    timer=setTimeout(poll,150);
+    poll();
   }
 
   function addOriginalActionButtons(bar) {
@@ -2474,6 +2514,10 @@ if (list.some(b=>b.row._wyOutOfService)) {
         if (selector === '.btnOutOfService') { openBlockingForm(); return; }
         source.click();
       }, 'wyOriginalAction');
+      if (selector === '.btnOutOfService') {
+        proxy.addEventListener('pointerenter',prepareBlockingPage);
+        proxy.addEventListener('focus',prepareBlockingPage);
+      }
       group.append(proxy);
       bindings.push({source,proxy,label});
     }
@@ -2627,6 +2671,7 @@ if (list.some(b=>b.row._wyOutOfService)) {
     refreshWarnings();
     initForecast();
     window.addEventListener('pagehide',()=>{
+      discardPreparedBlockingPage();
       for(const poller of [forecastPoller,warningPoller,weatherPoller])poller.stop();
       forecastMountObserver?.disconnect();
     });
@@ -2639,7 +2684,10 @@ if (list.some(b=>b.row._wyOutOfService)) {
     }).observe(oldTable, {childList:true, subtree:true, characterData:true});
 
 
-    load({preserveRange:true});
+    load({preserveRange:true}).then(() => {
+      if (window.requestIdleCallback) window.requestIdleCallback(prepareBlockingPage);
+      else setTimeout(prepareBlockingPage,500);
+    });
     return true;
   }
 
