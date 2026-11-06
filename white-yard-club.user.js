@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         White Yard Club · 每日預訂時間表
 // @namespace    wy-daily-reservation-schedule
-// @version      1.3.78
+// @version      1.3.79
 // @description  每日設施時間表，整合 Out of Service 灰色封鎖時段及 Remark，顯示付款狀態與建立時間。
 // @match        https://apps.nwd.com.hk/CMS/Club/FacilityBooking.aspx*
 // @grant        unsafeWindow
@@ -1331,16 +1331,11 @@ html.wyQuietNative .panelEdit, html.wyQuietNative #processPanel {opacity:0!impor
     table.addEventListener('mousemove', e => {
       const cell = e.target.closest('td[data-wy-column]');
       if (!cell || !table.contains(cell) || !cell.classList.contains('wyBookable')) { hideGridLocator(); return; }
-      const rows = Array.from(table.tBodies[0]?.rows || []);
-      const index = rows.findIndex(row => {
-        const r = row.getBoundingClientRect();
-        return e.clientY >= r.top && e.clientY < r.bottom;
-      });
-      if (index < 0) { hideGridLocator(); return; }
-      const row = rows[index].getBoundingClientRect();
+      // Scroll, resize and table rebuilds already invalidate the current outline.
+      if (cell === hoveredGridCell) return;
       const col = cell.getBoundingClientRect();
       const wholeBBQ = ['bbq1', 'bbq2'].includes(cell.dataset.wyColumnId) && cell.rowSpan > 1;
-      const band = wholeBBQ ? col : row;
+      const band = wholeBBQ ? col : cell.parentElement.getBoundingClientRect();
       const bounds = table.getBoundingClientRect();
       const scroll = table.closest('.wyScroll').getBoundingClientRect();
       const left = Math.max(bounds.left, scroll.left, 0);
@@ -2325,7 +2320,8 @@ if (list.some(b=>b.row._wyOutOfService)) {
   }
 
   let blockingOverlay = null;
-  let preparedBlockingPage = null;
+  const blockingPagePath = '/CMS/Club/OutOfService.aspx';
+  let blockingPrefetch = null;
   function createBlockingPage() {
     const shade = el('div', null, 'wyBlockingOverlay');
     shade.hidden = true;
@@ -2340,40 +2336,29 @@ if (list.some(b=>b.row._wyOutOfService)) {
     frame.title = 'OUT OF SERVICE — Create Blocking';
     // A same-origin frame keeps the native page scripts, dropdown data,
     // validation and authenticated SaveNoService flow in their own scope.
-    frame.src = new URL('/CMS/Club/OutOfService.aspx', location.origin).href;
+    frame.src = blockingPagePath;
     frame.style.visibility='hidden';
     card.append(toolbar,frame); shade.append(card); panel.append(shade);
     return {shade,toolbar,message,frame};
   }
-  function discardPreparedBlockingPage() {
-    if (!preparedBlockingPage) return;
-    clearTimeout(preparedBlockingPage.expiry);
-    preparedBlockingPage.shade.remove();
-    preparedBlockingPage = null;
-  }
   function prepareBlockingPage() {
-    if (preparedBlockingPage || blockingOverlay || document.hidden || !scheduleReady) return;
+    if (blockingPrefetch || blockingOverlay || document.hidden || !scheduleReady || navigator.connection?.saveData) return;
     const source = root.querySelector('.btnOutOfService');
     if (!source || source.disabled || source.hidden || source.classList.contains('hide') || source.style.display === 'none') return;
-    let who;
-    try { who = identity(); } catch { return; }
-    preparedBlockingPage = {...createBlockingPage(), who};
-    preparedBlockingPage.expiry = setTimeout(discardPreparedBlockingPage, 120000);
+    // A resource hint warms the browser cache without creating a browsing
+    // context or running the native page's scripts while the grid is in use.
+    blockingPrefetch = el('link');
+    blockingPrefetch.rel = 'prefetch';
+    blockingPrefetch.as = 'document';
+    blockingPrefetch.fetchPriority = 'low';
+    blockingPrefetch.href = blockingPagePath;
+    document.head.append(blockingPrefetch);
   }
   function openBlockingForm() {
     if (blockingOverlay) { blockingOverlay.querySelector('button')?.focus(); return; }
     hideHoverDetails(); hideGridLocator();
     const previousFocus = document.activeElement;
-    if (preparedBlockingPage) {
-      try {
-        const who = identity();
-        if (who.estate !== preparedBlockingPage.who.estate || who.user !== preparedBlockingPage.who.user) discardPreparedBlockingPage();
-      } catch { discardPreparedBlockingPage(); }
-    }
-    const page = preparedBlockingPage || createBlockingPage();
-    clearTimeout(page.expiry);
-    preparedBlockingPage = null;
-    const {shade, toolbar, message, frame} = page;
+    const {shade, toolbar, message, frame} = createBlockingPage();
     blockingOverlay = shade;
     shade.hidden = false;
     let stopped = false, opened = false, clickedAdd = false, timer, deadline;
@@ -2674,7 +2659,8 @@ if (list.some(b=>b.row._wyOutOfService)) {
     refreshWarnings();
     initForecast();
     window.addEventListener('pagehide',()=>{
-      discardPreparedBlockingPage();
+      blockingPrefetch?.remove();
+      blockingPrefetch = null;
       for(const poller of [forecastPoller,warningPoller,weatherPoller])poller.stop();
       forecastMountObserver?.disconnect();
     });
