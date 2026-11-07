@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         White Yard Club · 每日預訂時間表
 // @namespace    wy-daily-reservation-schedule
-// @version      1.3.79
+// @version      1.3.80
 // @description  每日設施時間表，整合 Out of Service 灰色封鎖時段及 Remark，顯示付款狀態與建立時間。
 // @match        https://apps.nwd.com.hk/CMS/Club/FacilityBooking.aspx*
 // @grant        unsafeWindow
@@ -16,7 +16,8 @@
 (function reservationMain(C) {
   'use strict';
 
-  /* 1.3.75: colour mixed-status bookings individually; block repeated create SAVE clicks while saving.
+  /* 1.3.80: bounded parallel loading; per-load blocking detail deduplication; indexed native updates; coalesced redraws.
+     1.3.75: colour mixed-status bookings individually; block repeated create SAVE clicks while saving.
      1.3.74: show only the create-time Change To while creating; retain the native status controls for existing bookings.
      1.3.73: transparent loading background; create-time Change To next to the native status control; default Pending label.
      1.3.72: show loading from the create SAVE click through native status confirmation and the final painted refresh; release on validation/save failure.
@@ -755,9 +756,17 @@ html.wyQuietNative .panelEdit, html.wyQuietNative #processPanel {opacity:0!impor
   function scan() {
     for(const editor of document.querySelectorAll(editorSelector))attach(editor);
   }
-  const observer=new MutationObserver(()=>{
+  const observer=new MutationObserver(records=>{
     for(const controller of controllers)if(controller.detached?.()){controller.stop();controllers.delete(controller);}
-    scan();
+    for (const record of records) {
+      const owner = record.target.closest?.(editorSelector);
+      if (owner) attach(owner);
+      for (const node of record.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        if (node.matches(editorSelector)) attach(node);
+        for (const editor of node.querySelectorAll(editorSelector)) attach(editor);
+      }
+    }
   });
   observer.observe(document.body,{childList:true,subtree:true});
   scan();
@@ -874,14 +883,14 @@ html.wyQuietNative .panelEdit, html.wyQuietNative #processPanel {opacity:0!impor
   // Load all groups: date filters may omit recurring groups which started earlier.
   async function loadNoServices(who, selected, signal) {
     const records = await queryBlockingGroups(who, '', signal);
-    const result = [];
-    for (const r of records) {
+    const detailsByGroup = new Map();
+    const groups = await C.mapLimit(records, 2, async r => {
       if (r.EstateID != null && String(r.EstateID) !== String(who.estate)) {
         throw Error('Out of Service 回傳了其他屋苑的記錄，已停止更新。');
       }
       const first = C.day(r.NoServiceDateFrom);
       const last = r.NoServiceDateTo == null || r.NoServiceDateTo === '' ? first : C.day(r.NoServiceDateTo);
-      if (C.valid(first) && C.valid(last) && (selected < first || selected > last)) continue;
+      if (C.valid(first) && C.valid(last) && (selected < first || selected > last)) return [];
       // The list's visible cells do not include recurrence. Fetch details if needed;
       // never assume that a missing Week/Day means every day.
       if (!C.blockRuleReady(r) || !(r.FacilityName || r.NameEng) ||
@@ -889,7 +898,9 @@ html.wyQuietNative .panelEdit, html.wyQuietNative #processPanel {opacity:0!impor
         if (r.NoServiceGroupID == null) throw Error('封鎖記錄缺少 NoServiceGroupID。');
         // The old page's data-load names a method absent from the live WSDL.
         // Use the actual search method's strNoServiceGroupID filter instead.
-        const details = await queryBlockingGroups(who, r.NoServiceGroupID, signal);
+        const id = String(r.NoServiceGroupID);
+        if (!detailsByGroup.has(id)) detailsByGroup.set(id, queryBlockingGroups(who, id, signal));
+        const details = await detailsByGroup.get(id);
         if (!details.length) throw Error('封鎖記錄 '+r.NoServiceGroupID+' 的規則未能讀取。');
         for (const detail of details) {
           if (detail.NoServiceGroupID != null && String(detail.NoServiceGroupID) !== String(r.NoServiceGroupID)) {
@@ -898,11 +909,12 @@ html.wyQuietNative .panelEdit, html.wyQuietNative #processPanel {opacity:0!impor
           if (detail.EstateID != null && String(detail.EstateID) !== String(who.estate)) {
             throw Error('封鎖記錄詳情屋苑不符，已停止更新。');
           }
-          result.push({...r,...detail});
         }
-      } else result.push(r);
-    }
-    return result;
+        return details.map(detail => ({...r,...detail}));
+      }
+      return [r];
+    }, signal);
+    return groups.flat();
   }
 
   let syncingDates = false, dateSyncTimer;
@@ -974,8 +986,9 @@ html.wyQuietNative .panelEdit, html.wyQuietNative #processPanel {opacity:0!impor
 
     const run = ++serial;
     controller?.abort();
-    controller = new AbortController();
-    const signal = controller.signal;
+    const runController = new AbortController();
+    controller = runController;
+    const signal = runController.signal;
 
     busy = true;
     scheduleReady = false;
@@ -1002,42 +1015,48 @@ html.wyQuietNative .panelEdit, html.wyQuietNative #processPanel {opacity:0!impor
       };
 
       const merged = new Map();
-      const statuses = [null, 'CAN', 'EXPI'];
-      for (const requestedStatus of statuses) {
-      const query = {...base, strStatus:requestedStatus};
-      const records = await C.collect(
-        (start, end) => invoke(
-          'GetFacliltyBookingWithSelectedRow',
-          {
-            ...query,
-            strStartRow: String(start),
-            strEndRow: String(end),
-            strOrder: 'Created Date',
-            strIsASC: '0'
-          },
-          signal
-        ),
-        () => invoke(
-          'GetFacliltyBookingTotalNumber',
-          { ...query, strFacilityID: '' },
-          signal
-        ),
-        (n, total) => {
-          if (run === serial) {
-            say(
-              '已讀取 ' + n + ' / ' +
-              (total == null ? '未知' : total) + ' 筆…'
-            );
-          }
-        }
-      );
+      // Two top-level jobs; blocking details use at most two workers. The entire
+      // load therefore has at most three schedule API requests in flight.
+      // Keep each status's pages sequential and merge in the original status order.
+      const jobs = [
+        () => loadNoServices(who, selected, signal),
+        ...[null, 'CAN', 'EXPI'].map(requestedStatus => async () => {
+          const query = {...base, strStatus:requestedStatus};
+          return C.collect(
+            (start, end) => invoke(
+              'GetFacliltyBookingWithSelectedRow',
+              {
+                ...query,
+                strStartRow: String(start),
+                strEndRow: String(end),
+                strOrder: 'Created Date',
+                strIsASC: '0'
+              },
+              signal
+            ),
+            () => invoke(
+              'GetFacliltyBookingTotalNumber',
+              { ...query, strFacilityID: '' },
+              signal
+            ),
+            (n, total) => {
+              if (run === serial) {
+                say(
+                  '已讀取 ' + n + ' / ' +
+                  (total == null ? '未知' : total) + ' 筆…'
+                );
+              }
+            }
+          );
 
-      for (const record of records) merged.set(String(record.FacilityBookingID ?? record.RefNo), record);
+        })
+      ];
+      const [blocks, ...recordGroups] = await C.mapLimit(jobs, 2, job => job(), signal);
+      for (const records of recordGroups) {
+        for (const record of records) merged.set(String(record.FacilityBookingID ?? record.RefNo), record);
       }
       const all = Array.from(merged.values());
       if (run !== serial) return;
-      say('正在讀取 Out of Service 封鎖時段及重複規則…');
-      const blocks = await loadNoServices(who, selected, signal);
       // Validate before committing either dataset so a failed refresh keeps both old ones.
       const blockCheck = C.blockRows(blocks, selected);
       if (blockCheck.errors.length) throw Error(blockCheck.errors.join('；'));
@@ -1065,6 +1084,8 @@ html.wyQuietNative .panelEdit, html.wyQuietNative #processPanel {opacity:0!impor
         })
       );
     } catch (e) {
+      // A failed branch must cancel sibling requests as well as stop queued jobs.
+      runController.abort();
       if (run === serial && e.name !== 'AbortError') {
         scheduleReady = false;
         say(e.message + ' 尚未更新時間表；已暫停從時間表建立預訂，請重新讀取。', true);
@@ -1077,6 +1098,7 @@ html.wyQuietNative .panelEdit, html.wyQuietNative #processPanel {opacity:0!impor
           busy = false;
           refreshButton.disabled = !!bookingSave;
           setScheduleLoading(false);
+          queueOriginalRender();
         }
       }
     }
@@ -1139,6 +1161,7 @@ html.wyQuietNative .panelEdit, html.wyQuietNative #processPanel {opacity:0!impor
     if (!state || bookingSave !== state) return;
     clearInterval(state.poll);
     bookingSave = null;
+    queueOriginalRender();
     for (const [control, disabled] of state.controls) control.disabled = disabled;
     refreshButton.disabled = busy;
     setScheduleLoading(busy, dateInput.value);
@@ -1839,21 +1862,43 @@ function updateDateLabel() {
   dateText.style.color =
     weekend || holidayNames.length ? '#B4412F' : '';
 }
-  function originalLastUpdate(r) {
-    if (!oldTable || !r.RefNo) return '';
-    const normalize = value => String(value ?? '').replace(/\s+/g, '').toLowerCase();
-    const headers = Array.from(oldTable.querySelectorAll('thead th'));
-    if (!headers.length) return '';
-    const refIndex = headers.findIndex(h => normalize(h.textContent) === 'refno');
-    const updateIndex = headers.findIndex(h => normalize(h.textContent) === 'lastupdate');
-    if (refIndex < 0 || updateIndex < 0) return '';
-    const ref = normalize(r.RefNo);
-    for (const row of oldTable.querySelectorAll('tbody tr')) {
-      if (normalize(row.cells[refIndex]?.textContent) === ref) {
-        return row.cells[updateIndex]?.textContent || '';
+  let originalUpdates = new Map(), originalUpdatesDirty = true, originalUpdatesChanged = false;
+  let originalRenderTimer;
+  function queueOriginalRender() {
+    clearTimeout(originalRenderTimer);
+    originalRenderTimer = setTimeout(() => {
+      // Loading/saving will queue this again when its final paint has finished.
+      if (busy || bookingSave || !shownDate) return;
+      refreshOriginalUpdates();
+      if (originalUpdatesChanged) render();
+    }, 100);
+  }
+  const normalizeOriginalRef = value => String(value ?? '').replace(/\s+/g, '').toLowerCase();
+  function refreshOriginalUpdates() {
+    if (!originalUpdatesDirty) return false;
+    originalUpdatesDirty = false;
+    const next = new Map();
+    if (oldTable) {
+      const headers = Array.from(oldTable.querySelectorAll('thead th'));
+      const refIndex = headers.findIndex(h => normalizeOriginalRef(h.textContent) === 'refno');
+      const updateIndex = headers.findIndex(h => normalizeOriginalRef(h.textContent) === 'lastupdate');
+      if (refIndex >= 0 && updateIndex >= 0) {
+        for (const row of oldTable.querySelectorAll('tbody tr')) {
+          const ref = normalizeOriginalRef(row.cells[refIndex]?.textContent);
+          // Preserve the original first-match behavior for duplicate references.
+          if (ref && !next.has(ref)) next.set(ref, row.cells[updateIndex]?.textContent || '');
+        }
       }
     }
-    return '';
+    const changed = next.size !== originalUpdates.size ||
+      Array.from(next).some(([key, value]) => !originalUpdates.has(key) || originalUpdates.get(key) !== value);
+    originalUpdates = next;
+    originalUpdatesChanged ||= changed;
+    return changed;
+  }
+  function originalLastUpdate(r) {
+    refreshOriginalUpdates();
+    return originalUpdates.get(normalizeOriginalRef(r.RefNo)) || '';
   }
   function hasFPS(r) {
     const fromAPI = Object.entries(r).some(([key,value]) => {
@@ -2003,6 +2048,17 @@ function updateDateLabel() {
  function render() {
   if (!shownDate) return;
   hideHoverDetails();
+  refreshOriginalUpdates();
+  originalUpdatesChanged = false;
+  const paymentCache = new Map(), fpsCache = new Map();
+  const stateOf = r => {
+    if (!paymentCache.has(r)) paymentCache.set(r, paymentState(r));
+    return paymentCache.get(r);
+  };
+  const fpsOf = r => {
+    if (!fpsCache.has(r)) fpsCache.set(r, hasFPS(r));
+    return fpsCache.get(r);
+  };
   renderInactive();
 
   const blocked = C.blockRows(noServiceData, shownDate);
@@ -2080,8 +2136,8 @@ function updateDateLabel() {
 
           const active = list.filter(b => !b.row._wyOutOfService && !C.cancelled(b.row) && !C.overdue(b.row));
 
-          const hasPending = active.some(b => paymentState(b.row) === 'PENDING');
-          const hasPaid = active.some(b => paymentState(b.row) === 'PAID');
+          const hasPending = active.some(b => stateOf(b.row) === 'PENDING');
+          const hasPaid = active.some(b => stateOf(b.row) === 'PAID');
           if (hasPending && hasPaid) {
             td.className = 'wyMixedCell';
           } else if (hasPending) {
@@ -2123,8 +2179,8 @@ function updateDateLabel() {
           const cls = 'wyBooking' + (
             C.cancelled(r) ? ' wyCancelled' :
             C.overdue(r) ? ' wyOverdue' :
-            paymentState(r) === 'PENDING' ? ' wyPending' :
-            paymentState(r) === 'PAID' ? ' wySettled' : ''
+            stateOf(r) === 'PENDING' ? ' wyPending' :
+            stateOf(r) === 'PAID' ? ' wySettled' : ''
           );
 
           const btn = button(null, () => openRecord(r), cls);
@@ -2133,10 +2189,11 @@ function updateDateLabel() {
           btn.append(el('span', C.unit(r), 'wyBookingUnit'));
           btn.append(el('small', facilityIconLabel(g.columns[j], r), 'wySport'));
 
+          const paidByFPS = stateOf(r) === 'PAID' && fpsOf(r);
           btn.append(
             el('small', (r.TimeFrom || '') + '–' + (r.TimeTo || ''), 'wyBookingTime'),
-            el('small', paymentState(r) === 'PAID' && hasFPS(r) ? 'PAID by FPS' : paymentState(r),
-              'wyPayment' + (paymentState(r) === 'PAID' && hasFPS(r) ? ' wyFPSPayment' : ''))
+            el('small', paidByFPS ? 'PAID by FPS' : stateOf(r),
+              'wyPayment' + (paidByFPS ? ' wyFPSPayment' : ''))
           );
 
 
@@ -2666,11 +2723,15 @@ if (list.some(b=>b.row._wyOutOfService)) {
     });
     installBookingSuccessHooks();
     // The original list may finish loading after the schedule API request.
-    let originalRenderTimer;
-    new MutationObserver(() => {
+    const originalObserver = new MutationObserver(() => {
+      originalUpdatesDirty = true;
+      queueOriginalRender();
+    });
+    originalObserver.observe(oldTable, {childList:true, subtree:true, characterData:true});
+    window.addEventListener('pagehide', () => {
+      originalObserver.disconnect();
       clearTimeout(originalRenderTimer);
-      originalRenderTimer = setTimeout(() => { if (shownDate) render(); }, 100);
-    }).observe(oldTable, {childList:true, subtree:true, characterData:true});
+    }, {once:true});
 
 
     load({preserveRange:true}).then(() => {
@@ -3036,6 +3097,25 @@ if (list.some(b=>b.row._wyOutOfService)) {
     return { columns, accepted, warnings, matrix };
   }
 
+  // Preserve input order regardless of completion order. Stop scheduling after
+  // failure/abort; the caller owns cancellation of any already-running requests.
+  async function mapLimit(items, concurrency, task, signal) {
+    const result = new Array(items.length);
+    let cursor = 0, failed = false;
+    async function worker() {
+      try {
+        while (!failed && cursor < items.length) {
+          signal?.throwIfAborted();
+          const index = cursor++;
+          result[index] = await task(items[index], index);
+        }
+        signal?.throwIfAborted();
+      } catch (e) { failed = true; throw e; }
+    }
+    await Promise.all(Array.from({length:Math.min(concurrency, items.length)}, worker));
+    return result;
+  }
+
   async function collect(getPage, getCount, progress = () => {}) {
     let expected = null;
 
@@ -3052,7 +3132,9 @@ if (list.some(b=>b.row._wyOutOfService)) {
       ) {
         expected = Number(n);
       }
-    } catch {}
+    } catch (e) {
+      if (e?.name === 'AbortError') throw e;
+    }
 
     const result = [];
     const seen = new Set();
@@ -3100,6 +3182,6 @@ if (list.some(b=>b.row._wyOutOfService)) {
 
   return {
     venueName, blockRuleReady, blockRows, cols, valid, day, dmy, minutes, cancelled, overdue, key,
-    classify, unit, unwrap, rows, grid, collect
+    classify, unit, unwrap, rows, grid, collect, mapLimit
   };
 })());
